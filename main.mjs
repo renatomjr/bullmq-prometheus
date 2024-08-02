@@ -37,14 +37,12 @@ const redis = new Redis({
   tls: REDIS_CA ? { ca: Buffer.from(REDIS_CA, "base64"), rejectUnauthorized: true } : undefined
 });
 
-app.get("/health", (_, res) => {
-  res.code(redis.status === "ready" ? 200 : 503).send();
-});
+let discoveredQueues;
 
-app.get("/metrics", async (_, res) => {
-  const metrics = {};
+async function discoverQueues() {
+  if (discoveredQueues === undefined) discoveredQueues = {};
 
-  for (const [index, db] of databases) {
+  for (const [index] of databases) {
     await redis.select(index);
 
     let cursor = "0";
@@ -55,6 +53,27 @@ app.get("/metrics", async (_, res) => {
       queues.push(...elements);
       cursor = next;
     } while (cursor !== "0");
+
+    discoveredQueues[index] = queues;
+  }
+}
+
+app.get("/health", { logLevel: 'warn' }, (_, res) => {
+  res.code(redis.status === "ready" ? 200 : 503).send();
+});
+
+app.get("/discover", async (_, res) => {
+  await discoverQueues();
+  res.code(200).send();
+});
+
+app.get("/metrics", async (_, res) => {
+  const metrics = {};
+
+  for (const [index, db] of databases) {
+    await redis.select(index);
+
+    const queues = discoveredQueues[index] || [];
 
     const multi = redis.multi();
 
@@ -132,4 +151,5 @@ process.on("SIGINT", async () => {
 });
 
 await once(redis, "ready");
+await discoverQueues();
 await app.listen({ host: HOST, port: PORT });
